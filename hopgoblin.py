@@ -160,16 +160,53 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 def mutate_path(path):
-    return [mut.format(path) for mut in PATH_MUTATORS]
+    mutations = [mut.format(path) for mut in PATH_MUTATORS]
+    debug(f'Path mutations for {path}: {mutations}')
+    return mutations
 
 def request(path, method='get', **kwargs):
     full_url = AUTHORITY + path
     debug(f'>>>>> {method.upper()} {full_url}')
+    if PROXY:
+        debug(f'Using proxy: {PROXY}')
     
+    # Force HTTP/1.1 by creating a session with custom adapter
+    session = requests.Session()
+    
+    # Create custom adapter that forces HTTP/1.1
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=1,
+        pool_maxsize=1,
+        max_retries=0
+    )
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    
+    # Ensure headers dict exists
     if 'headers' not in kwargs:
         kwargs['headers'] = {}
-    if 'User-Agent' not in kwargs['headers']:
-        kwargs['headers']['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/109.0'
+    # Note: We'll rely on the underlying urllib3 to use HTTP/1.1 by default
+    
+    # Set default headers that match Chrome browser
+    default_headers = {
+        'Cache-Control': 'max-age=0',
+        'Sec-Ch-Ua': '"Google Chrome";v="139", "Not=A?Brand";v="8", "Chromium";v="139"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"macOS"',
+        'Accept-Language': 'en-US;q=0.9,en;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-User': '?1',
+        'Sec-Fetch-Dest': 'document',
+        'Accept-Encoding': 'text/html'
+    }
+    
+    # Add default headers, but don't override existing ones
+    for header, value in default_headers.items():
+        if header not in kwargs['headers']:
+            kwargs['headers'][header] = value
     
     if PROXY:
         if 'proxies' not in kwargs:
@@ -177,34 +214,45 @@ def request(path, method='get', **kwargs):
                 'http': PROXY,
                 'https': PROXY
             }
+        # Disable SSL verification when using proxy to avoid certificate issues
+        kwargs['verify'] = False
+        # Disable warnings about unverified HTTPS requests
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     try:
         if 'timeout' not in kwargs:
-            kwargs['timeout'] = (5, 10)
+            kwargs['timeout'] = (10, 30)  # Increased timeouts for large payloads
         
-        kwargs['stream'] = True
+        # Don't use streaming for large POST requests as it can cause hangs
+        if method.lower() == 'post' and 'data' in kwargs:
+            kwargs['stream'] = False
+        else:
+            kwargs['stream'] = True
             
-        r = requests.request(method, full_url, **kwargs)
+        r = session.request(method, full_url, **kwargs)
         debug(f'<<<<< {r.status_code} {r.reason}')
         
-        content = b''
-        
-        try:
-            import time
-            start_time = time.time()
-            for chunk in r.iter_content(chunk_size=8192, decode_unicode=False):
-                if chunk:
-                    content += chunk
-                    
-                    if time.time() - start_time > 30:
-                        debug(f'Timeout reading response content after 30 seconds')
-                        break
-        except Exception as e:
-            debug(f'Error reading response content: {e}')
-            pass
-        
-        r._content = content
-        r._content_consumed = True
+        # Only do manual content reading for streaming requests
+        if kwargs.get('stream', False):
+            content = b''
+            
+            try:
+                import time
+                start_time = time.time()
+                for chunk in r.iter_content(chunk_size=8192, decode_unicode=False):
+                    if chunk:
+                        content += chunk
+                        
+                        if time.time() - start_time > 30:
+                            debug(f'Timeout reading response content after 30 seconds')
+                            break
+            except Exception as e:
+                debug(f'Error reading response content: {e}')
+                pass
+            
+            r._content = content
+            r._content_consumed = True
         
         return r
     except requests.exceptions.Timeout as e:
@@ -213,6 +261,8 @@ def request(path, method='get', **kwargs):
     except requests.exceptions.RequestException as e:
         debug(f'Request failed for {full_url}: {e}')
         return None
+    finally:
+        session.close()
 
 def check_exposed_querybuilder_json():
     for path in mutate_path('/bin/querybuilder.json'):
