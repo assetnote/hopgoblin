@@ -203,7 +203,7 @@ def request(path, method='get', **kwargs):
         'Sec-Ch-Ua-Mobile': '?0',
         'Sec-Ch-Ua-Platform': '"macOS"',
         'Accept-Language': 'en-US;q=0.9,en;q=0.8',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+        'User-Agent': 'hopgoblin/1.0',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'Sec-Fetch-Site': 'none',
         'Sec-Fetch-Mode': 'navigate',
@@ -217,17 +217,18 @@ def request(path, method='get', **kwargs):
         if header not in kwargs['headers']:
             kwargs['headers'][header] = value
     
+    # Always disable SSL verification to handle certificate mismatches (common with IP addresses)
+    kwargs['verify'] = False
+    # Disable warnings about unverified HTTPS requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
     if PROXY:
         if 'proxies' not in kwargs:
             kwargs['proxies'] = {
                 'http': PROXY,
                 'https': PROXY
             }
-        # Disable SSL verification when using proxy to avoid certificate issues
-        kwargs['verify'] = False
-        # Disable warnings about unverified HTTPS requests
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     try:
         if 'timeout' not in kwargs:
@@ -251,10 +252,6 @@ def request(path, method='get', **kwargs):
             json_data = r.json()
         except (ValueError, requests.exceptions.JSONDecodeError):
             json_data = None
-        
-        # Test if response is valid before returning
-        if status_code == 502:
-            print(f"DEBUG: About to return 502 response for {full_url}")
         
         session.close()
         
@@ -382,14 +379,14 @@ def check_el_injection():
         payload_size = len(str(upload_payload))
         
         upload_succeeded = False
-        got_502_error = False
+        got_5xx_error = False
         
         for path in mutate_path('/conf/global/settings/dam/import/cloudsettings.bulkimportConfig.json'):
             r = request(path, method='post', data=upload_payload)
             
-            if r and r.status_code == 502:
-                print(f"DEBUG: Got 502 for {path}")
-                got_502_error = True
+            if r and (r.status_code == 502 or r.status_code == 503 or r.status_code == 500):
+                print(f"DEBUG: Got 5xx for {path}")
+                got_5xx_error = True
                 # Continue trying other paths in case one works
                 continue
             elif r and (r.status_code == 201 or r.status_code == 200):
@@ -399,8 +396,8 @@ def check_el_injection():
         
         if upload_succeeded:
             break
-        elif got_502_error and retry_count < max_retries:
-            print_neutral(f'Got 502 error, reducing payload size and retrying (attempt {retry_count + 2}/{max_retries + 1})')
+        elif got_5xx_error and retry_count < max_retries:
+            print_neutral(f'Got 5xx error, reducing payload size and retrying (attempt {retry_count + 2}/{max_retries + 1})')
             # Reduce payload size by half
             bundle_limit_1 = max(10, bundle_limit_1 // 2)
             service_limit_1 = max(5, service_limit_1 // 2)
@@ -409,9 +406,9 @@ def check_el_injection():
             retry_count += 1
             # Continue to next iteration to regenerate payload with new limits
         else:
-            # Either no 502 errors (so payload size isn't the issue) or max retries reached
-            if got_502_error:
-                print_neutral(f'Still getting 502 after {max_retries + 1} attempts, giving up')
+            # Either no 5xx errors (so payload size isn't the issue) or max retries reached
+            if got_5xx_error:
+                print_neutral(f'Still getting 5xx after {max_retries + 1} attempts, giving up')
             return
 
     for path in mutate_path('/etc/cloudsettings/.kernel.html/conf/global/settings/dam/import/cloudsettings/jcr:content'):
