@@ -454,7 +454,7 @@ def querybuilder_check_writable_nodes(path):
             'p.properties=jcr:path',
             'p.limit=3'
         ]
-        query_string = '&'.join(query_parts) + f'&&hasPermission={perm}'
+        query_string = '&'.join(query_parts) + f'&hasPermission={perm}'
         full_path = f'{path}?{query_string}'
         
         try:
