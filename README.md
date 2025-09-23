@@ -94,3 +94,27 @@ optional arguments:
 ```
 
 ---
+
+## CVEs
+
+During our research we identified and reported several vulnerabilities in Adobe Experience Manager, which were assigned CVEs:
+
+- [CVE-2025-54251](https://www.cve.org/CVERecord?id=CVE-2025-54251)
+- [CVE-2025-54249](https://www.cve.org/CVERecord?id=CVE-2025-54249)
+- [CVE-2025-54252](https://www.cve.org/CVERecord?id=CVE-2025-54252)
+- [CVE-2025-54250](https://www.cve.org/CVERecord?id=CVE-2025-54250)
+- [CVE-2025-54247](https://www.cve.org/CVERecord?id=CVE-2025-54247)
+- [CVE-2025-54248](https://www.cve.org/CVERecord?id=CVE-2025-54248)
+- [CVE-2025-54246](https://www.cve.org/CVERecord?id=CVE-2025-54246)
+
+For more details, see Adobe’s official advisory:  
+[Adobe Security Bulletin APSB25-90](https://helpx.adobe.com/security/products/experience-manager/apsb25-90.html)
+
+---
+
+## Conference Talk
+
+This research and tool were presented at **BSides Canberra 2025**:  
+[Finding Critical Bugs in Adobe Experience Manager](https://cfp.bsidescbr.com.au/bsides-canberra-2025/talk/HBAGKK/)
+
+Slides: 
