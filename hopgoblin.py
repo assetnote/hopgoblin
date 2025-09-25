@@ -16,6 +16,7 @@ AUTHORITY = None
 SSRF_TARGET = None
 DEBUG = False
 PROXY = None
+ALLOWED_HTTP_RESPONSE_CODES = [200]
 print_lock = threading.Lock()
 progress_bar = None
 progress_lock = threading.Lock()
@@ -239,7 +240,11 @@ def request(path, method='get', **kwargs):
             
         r = session.request(method, full_url, **kwargs)
         debug(f'<<<<< {r.status_code} {r.reason}')
-        
+
+        # Only accept certain HTTP response codes
+        if r.status_code not in ALLOWED_HTTP_RESPONSE_CODES:
+            raise requests.exceptions.RequestException(f'HTTP Response code: {r.status_code}')
+
         # Read the content and store all needed attributes before closing session
         content = r.content
         status_code = r.status_code
