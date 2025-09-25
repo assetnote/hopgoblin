@@ -28,7 +28,7 @@ It automates a handful of checks that we frequently perform manually during secu
 Clone the repository and install dependencies:
 
 ```bash
-git clone https://github.com/yourorg/hopgoblin.git
+git clone https://github.com/assetnote/hopgoblin.git
 cd hopgoblin
 pip install -r requirements.txt
 ```
