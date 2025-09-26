@@ -250,7 +250,7 @@ def request(path, method='get', **kwargs):
         # Try to parse JSON, but don't fail if it's not valid JSON
         try:
             json_data = r.json()
-        except (ValueError, requests.exceptions.JSONDecodeError):
+        except:
             json_data = None
         
         session.close()
